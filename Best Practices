@@ -12,7 +12,7 @@ Proteins should be collapsed to unique identifiers (one column per protein).
 
 The measured proteome should be sufficiently large to generate a PPI network of adequate size and density for meaningful set construction.
 
-Input Matrix Format
+Input Matrix Format (.csv)
 
 Rows represent subjects and columns represent the outcome variable followed by protein measurements.
 
