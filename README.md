@@ -11,19 +11,19 @@ Pipeline Overview
 
 The NIRRA pipeline consists of the following stages:
 
-STRING-based PPI set generation
+1) STRING-based PPI set generation
 Construction of candidate protein sets using interaction networks derived from STRING.
 
-Ridge regression modeling
+2) Ridge regression modeling
 Training predictive models for each protein set against a target phenotype.
 
-Set clustering
+3) Set clustering
 Grouping predictive sets based on protein composition to identify higher-level modules.
 
-Module ranking
+4) Module ranking
 Ranking modules based on predictive performance.
 
-Motif-based decomposition and HEB stabilization
+5) Motif-based decomposition and HEB stabilization
 Decomposition of ridge models into signed protein motifs and stabilization of motif effect estimates using hierarchical empirical Bayes (HEB).
 
 Repository Contents
