@@ -1,3 +1,6 @@
+# NIRRA
+Network-Informed Restricted-set Ridge Analysis pipeline for proteomics data
+
 NIRRA
 
 Network-Informed Restricted-set Ridge Analysis
