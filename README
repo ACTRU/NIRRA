@@ -18,7 +18,7 @@ Set clustering
 Grouping predictive sets based on protein composition to identify higher-level modules.
 
 Module ranking
-Ranking modules based on predictive performance and set composition.
+Ranking modules based on predictive performance.
 
 Motif-based decomposition and HEB stabilization
 Decomposition of ridge models into signed protein motifs and stabilization of motif effect estimates using hierarchical empirical Bayes (HEB).
