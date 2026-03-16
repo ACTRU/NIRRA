@@ -48,7 +48,7 @@ This metric captures the **predictive mass** of each module, prioritizing module
 
 ---
 
-### Step 5: Motif Decomposition
+### Step 5: Motif Decomposition and Hierarchical Empirical Bayes Stabilization of Motif Predictiveness (R^2)
 
 Protein sets were decomposed into **signed protein pairs (motifs)**. Signed pairs represent the largest unit of interaction information that is consistently available across sets of sizes 2–6.
 
@@ -59,10 +59,6 @@ To improve robustness, two constraints were imposed:
 1. A protein was included in a motif only if it contributed at least **5% of the model’s total absolute ridge weight**, ensuring that weakly contributing proteins were excluded.
 
 2. Motifs were required to appear in **at least five independent carrier sets**. Motifs observed in fewer sets were considered too sparse to reliably estimate predictive performance.
-
----
-
-### Step 6: Hierarchical Empirical Bayes Stabilization of Motif (R^2)
 
 Motifs appear in different numbers of ridge regression sets due to the topology of the sampled PPI network. Motifs represented in only a small number of sets therefore have **noisy estimates of predictive performance**.
 
