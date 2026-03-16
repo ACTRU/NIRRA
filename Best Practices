@@ -24,6 +24,12 @@ S2        -0.34     0.61   -1.12 0.74  -0.44
 
 Script Notes
 
+Before running the script:
+
+Set the appropriate input and output file paths
+
+Replace FirstProtein and LastProtein with the column names corresponding to the first and last protein columns in your dataframe.
+
 The parameter settings and thresholds used in this pipeline were optimized for the dataset analyzed in the original NIRRA study. Users applying the method to different datasets may need to adjust parameters accordingly.
 
 The regression stage of the pipeline is computationally intensive. For example, evaluating ~100,000 unique protein sets may require several hours to complete depending on hardware and dataset size.
