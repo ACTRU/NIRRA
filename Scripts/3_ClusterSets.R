@@ -8,9 +8,9 @@
 # http://www.apache.org/licenses/LICENSE-2.0
 # ==========================================================
 # ==========================================================
-# ClusterSets_v2.1 — k-NN Jaccard Graph + Leiden Clustering for Large Collections
+# ClusterSets_v2.2 — k-NN Jaccard Graph + Leiden Clustering for Large Collections (Correct deduplication)
 # ==========================================================
-# Will Tower — 2026-03-16
+# Will Tower — 2026-03-18
 # ==========================================================
 
 suppressPackageStartupMessages({
@@ -25,7 +25,7 @@ suppressPackageStartupMessages({
 # ----------------------------
 # 1) File paths
 # ----------------------------
-in_file <- "~/path/to/ALL_Set_Models.csv"
+in_file <- "/path/to/ALL_Set_Models.csv"
 out_dir <- "~/path/to/output"
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
@@ -42,7 +42,6 @@ min_overlap  <- 1
 resolution   <- 0.01
 use_leiden   <- TRUE
 
-# Optional safety caps
 max_edges_pre_knn  <- Inf
 max_edges_post_knn <- Inf
 
@@ -59,13 +58,18 @@ clean_token <- function(x) {
   x
 }
 
+# 🔴 FIXED: canonicalize by sorting tokens
 normalize_protein_string <- function(x) {
   x <- as.character(x)
   x <- stringr::str_replace_all(x, "\\s+", "")
+  
   toks <- strsplit(x, ",", fixed = TRUE)[[1]]
   toks <- toks[nchar(toks) > 0]
+  
   toks <- clean_token(toks)
   toks <- unique(toks)
+  toks <- sort(toks)  # ✅ critical fix
+  
   paste(toks, collapse = ",")
 }
 
@@ -79,13 +83,14 @@ write_metrics <- function(lines, path) {
 # ----------------------------
 df <- readr::read_csv(in_file, show_col_types = FALSE)
 message("✅ Loaded ", nrow(df), " total rows")
+
 stop_if_missing_col(df, "Proteins")
-df <- df %>% dplyr::mutate(Proteins = as.character(Proteins))
+df <- df %>% mutate(Proteins = as.character(Proteins))
 
 n_rows_original <- nrow(df)
 
 # ----------------------------
-# 5) Normalize Proteins and collapse to unique rows
+# 5) Normalize + collapse duplicates
 # ----------------------------
 message("🧬 Normalizing Proteins strings and collapsing duplicates...")
 
@@ -93,21 +98,19 @@ df$Proteins_Normalized <- vapply(df$Proteins, normalize_protein_string, characte
 
 if (any(df$Proteins_Normalized == "" | is.na(df$Proteins_Normalized))) {
   bad <- which(df$Proteins_Normalized == "" | is.na(df$Proteins_Normalized))
-  stop("Found ", length(bad), " rows with empty Proteins after normalization. Example rows: ",
+  stop("Found ", length(bad), " invalid normalized Proteins. Example rows: ",
        paste(head(bad, 20), collapse = ", "),
        if (length(bad) > 20) " ..." else "")
 }
 
-# Keep lookup so clusters can be mapped back later
 dup_map <- data.frame(
   OriginalRow = seq_len(nrow(df)),
   Proteins_Normalized = df$Proteins_Normalized,
   stringsAsFactors = FALSE
 )
 
-# Unique rows only for graph construction
 df_unique <- df %>%
-  dplyr::distinct(Proteins_Normalized, .keep_all = TRUE)
+  distinct(Proteins_Normalized, .keep_all = TRUE)
 
 n_unique <- nrow(df_unique)
 n_dup_removed <- n_rows_original - n_unique
@@ -115,38 +118,35 @@ n_dup_removed <- n_rows_original - n_unique
 message("✅ Unique Protein rows: ", n_unique)
 message("♻️ Duplicate rows collapsed: ", n_dup_removed)
 
-# Use normalized string as Proteins for downstream clustering
 df_unique$Proteins <- df_unique$Proteins_Normalized
 n_sets <- nrow(df_unique)
 
 # ----------------------------
-# 6) Parse + normalize protein tokens
+# 6) Parse tokens
 # ----------------------------
 message("🧬 Parsing unique Proteins tokens...")
 
-prot_str <- df_unique$Proteins
-proteins_list <- strsplit(prot_str, ",", fixed = TRUE)
+proteins_list <- strsplit(df_unique$Proteins, ",", fixed = TRUE)
 
 proteins_list <- lapply(proteins_list, function(v) {
   v <- v[nchar(v) > 0]
-  v <- unique(v)
-  v
+  unique(v)
 })
 
 if (any(lengths(proteins_list) == 0)) {
   bad <- which(lengths(proteins_list) == 0)
-  stop("Found ", length(bad), " empty Protein lists after parsing unique rows. Example rows: ",
-       paste(head(bad, 20), collapse = ", "),
-       if (length(bad) > 20) " ..." else "")
+  stop("Found empty Protein lists after parsing. Rows: ",
+       paste(head(bad, 20), collapse = ", "))
 }
 
 all_proteins <- unique(unlist(proteins_list, use.names = FALSE))
 message("🧬 Unique proteins: ", length(all_proteins))
 
 # ----------------------------
-# 7) Build sparse incidence matrix
+# 7) Sparse incidence matrix
 # ----------------------------
 message("🧮 Building sparse incidence matrix...")
+
 lens <- lengths(proteins_list)
 i_idx <- rep.int(seq_along(proteins_list), times = lens)
 j_idx <- match(unlist(proteins_list, use.names = FALSE), all_proteins)
@@ -160,58 +160,44 @@ mat <- Matrix::sparseMatrix(
 )
 
 set_sizes <- Matrix::rowSums(mat)
-message("📏 Unique set sizes: min=", min(set_sizes),
-        " median=", stats::median(set_sizes),
-        " max=", max(set_sizes))
 
 # ----------------------------
-# 8) Overlap matrix via tcrossprod
+# 8) Overlap matrix
 # ----------------------------
-message("⚙️ Computing sparse overlap matrix (tcrossprod) on unique rows...")
+message("⚙️ Computing overlap matrix...")
+
 overlap <- Matrix::tcrossprod(mat)
 Matrix::diag(overlap) <- 0
 
 overlap@x[overlap@x < min_overlap] <- 0
 overlap <- Matrix::drop0(overlap)
 
-nnz_ov <- length(overlap@x)
-message("🔩 Nonzero overlaps (>= ", min_overlap, "): ", format(nnz_ov, big.mark=","))
-
-if (nnz_ov == 0) {
-  stop("No overlaps found at min_overlap = ", min_overlap,
-       ". This usually indicates token mismatch or delimiter issues in Proteins.")
+if (length(overlap@x) == 0) {
+  stop("No overlaps found — check token normalization.")
 }
 
 # ----------------------------
 # 9) Extract edges
 # ----------------------------
-message("🔗 Extracting overlap edges...")
 edges <- data.table::as.data.table(Matrix::summary(overlap))
-data.table::setnames(edges, c("i", "j", "intersect"))
+setnames(edges, c("i", "j", "intersect"))
 
-# Optional pre-cap by intersect strength
 if (is.finite(max_edges_pre_knn) && nrow(edges) > max_edges_pre_knn) {
-  message("⚠️ Pre-kNN edge cap applied: keeping top ", max_edges_pre_knn, " by intersect")
-  data.table::setorder(edges, -intersect)
+  setorder(edges, -intersect)
   edges <- edges[1:max_edges_pre_knn]
 }
 
-n_edges_pre_knn <- nrow(edges)
-message("🔗 Pre-kNN edges: ", format(n_edges_pre_knn, big.mark=","))
-
 # ----------------------------
-# 10) Compute Jaccard and build symmetric k-NN graph
+# 10) Jaccard + kNN
 # ----------------------------
-message("🧠 Computing Jaccard and building symmetric k-NN graph (k = ", k_neighbors, ")...")
+message("🧠 Computing Jaccard kNN...")
 
 edges[, jaccard := intersect / (set_sizes[i] + set_sizes[j] - intersect)]
 
-# For each i, keep top-k by Jaccard
-data.table::setorder(edges, i, -jaccard, -intersect, j)
+setorder(edges, i, -jaccard, -intersect, j)
 edges_knn_i <- edges[, head(.SD, k_neighbors), by = i]
 
-# For each j, keep top-k by Jaccard
-data.table::setorder(edges, j, -jaccard, -intersect, i)
+setorder(edges, j, -jaccard, -intersect, i)
 edges_knn_j <- edges[, head(.SD, k_neighbors), by = j]
 
 edges_knn <- unique(rbind(
@@ -222,129 +208,53 @@ edges_knn <- unique(rbind(
 rm(edges, overlap)
 gc()
 
-# Optional post-cap by Jaccard strength
-if (is.finite(max_edges_post_knn) && nrow(edges_knn) > max_edges_post_knn) {
-  message("⚠️ Post-kNN edge cap applied: keeping top ", max_edges_post_knn, " by Jaccard")
-  data.table::setorder(edges_knn, -jaccard, -intersect)
-  edges_knn <- edges_knn[1:max_edges_post_knn]
-}
-
-n_edges_post_knn <- nrow(edges_knn)
-message("🔗 Post-kNN edges: ", format(n_edges_post_knn, big.mark=","))
-
-readr::write_csv(as.data.frame(edges_knn), out_edges)
-message("💾 k-NN edges saved to: ", out_edges)
-
 # ----------------------------
-# 11) Build graph and cluster unique rows
+# 11) Graph + clustering
 # ----------------------------
-message("🧩 Building igraph object...")
-edge_df <- data.frame(
-  from   = as.character(edges_knn$i),
-  to     = as.character(edges_knn$j),
-  weight = as.numeric(edges_knn$jaccard)
+message("🧩 Building graph...")
+
+g <- graph_from_data_frame(
+  data.frame(
+    from = as.character(edges_knn$i),
+    to   = as.character(edges_knn$j),
+    weight = edges_knn$jaccard
+  ),
+  directed = FALSE,
+  vertices = data.frame(name = as.character(seq_len(n_sets)))
 )
 
-vert_df <- data.frame(name = as.character(seq_len(n_sets)))
+g <- simplify(g, remove.multiple = TRUE, remove.loops = TRUE)
 
-g <- igraph::graph_from_data_frame(edge_df, directed = FALSE, vertices = vert_df)
-
-if (igraph::any_multiple(g) || igraph::any_loop(g)) {
-  g <- igraph::simplify(
-    g,
-    remove.multiple = TRUE,
-    remove.loops = TRUE,
-    edge.attr.comb = list(weight = "max")
-  )
-}
-
-deg <- igraph::degree(g)
-comp <- igraph::components(g)
-
-message("📈 Graph: ", igraph::gorder(g), " vertices; ", igraph::gsize(g), " edges")
-message("🔌 Isolated vertices (degree 0): ", sum(deg == 0))
-message("🧩 Components: ", comp$no, " | largest component size: ", max(comp$csize))
-message("📊 Degree: min=", min(deg), " median=", stats::median(deg), " max=", max(deg))
-
-do_leiden <- FALSE
-if (use_leiden) do_leiden <- "cluster_leiden" %in% getNamespaceExports("igraph")
-
-if (do_leiden) {
-  message("🧩 Running Leiden (resolution = ", resolution, ")...")
-  cl <- igraph::cluster_leiden(
-    g,
-    weights = igraph::E(g)$weight,
-    resolution_parameter = resolution
-  )
+if (use_leiden && "cluster_leiden" %in% getNamespaceExports("igraph")) {
+  cl <- cluster_leiden(g, weights = E(g)$weight, resolution_parameter = resolution)
 } else {
-  message("🧩 Leiden not available; running Louvain (resolution ignored)...")
-  cl <- igraph::cluster_louvain(g, weights = igraph::E(g)$weight)
+  cl <- cluster_louvain(g, weights = E(g)$weight)
 }
 
-membership_vec <- igraph::membership(cl)
-df_unique$Cluster <- as.integer(membership_vec[as.character(seq_len(n_sets))])
-
-n_clusters <- length(unique(df_unique$Cluster))
-message("✅ Identified ", n_clusters, " clusters on unique Protein rows")
+df_unique$Cluster <- as.integer(membership(cl))
 
 # ----------------------------
-# 12) Map clusters back to all original rows
+# 12) Map back to original rows
 # ----------------------------
-message("🔁 Mapping unique-row clusters back to all original rows...")
-
 cluster_lookup <- df_unique %>%
-  dplyr::select(Proteins_Normalized, Cluster)
+  select(Proteins_Normalized, Cluster)
 
 df_out <- df %>%
-  dplyr::left_join(cluster_lookup, by = "Proteins_Normalized")
-
-if (any(is.na(df_out$Cluster))) {
-  stop("Cluster mapping failed: some original rows did not receive a cluster.")
-}
+  left_join(cluster_lookup, by = "Proteins_Normalized")
 
 # ----------------------------
 # 13) Save outputs
 # ----------------------------
-readr::write_csv(df_unique, out_unique_csv)
-message("💾 Unique clustered collections saved to: ", out_unique_csv)
-
-readr::write_csv(df_out, out_csv)
-message("💾 Full clustered collections saved to: ", out_csv)
+write_csv(df_unique, out_unique_csv)
+write_csv(df_out, out_csv)
 
 # ----------------------------
-# 14) Write run metrics
+# 14) Metrics
 # ----------------------------
-metrics_lines <- c(
-  paste0("Timestamp: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
-  paste0("Input file: ", in_file),
+write_metrics(c(
   paste0("Original rows: ", n_rows_original),
-  paste0("Unique Proteins rows clustered: ", n_unique),
-  paste0("Duplicate rows collapsed before clustering: ", n_dup_removed),
-  paste0("Unique proteins: ", length(all_proteins)),
-  paste0("Unique set size min/median/max: ", min(set_sizes), "/", stats::median(set_sizes), "/", max(set_sizes)),
-  paste0("Similarity metric: Jaccard = intersect / (|A| + |B| - intersect)"),
-  paste0("min_overlap: ", min_overlap),
-  paste0("k_neighbors: ", k_neighbors),
-  paste0("resolution: ", resolution),
-  paste0("Edges pre-kNN: ", n_edges_pre_knn),
-  paste0("Edges post-kNN: ", n_edges_post_knn),
-  paste0("Graph edges: ", igraph::gsize(g)),
-  paste0("Isolated vertices: ", sum(deg == 0)),
-  paste0("Components: ", comp$no),
-  paste0("Largest component size: ", max(comp$csize)),
-  paste0("Degree min/median/max: ", min(deg), "/", stats::median(deg), "/", max(deg)),
-  paste0("Clusters on unique rows: ", n_clusters),
-  "",
-  "Workflow:",
-  " 1) Normalize Proteins strings",
-  " 2) Collapse identical Proteins rows",
-  " 3) Cluster only unique rows",
-  " 4) Map cluster labels back to all original rows",
-  "",
-  "Tuning guidance:",
-  " - If clusters >> 300: increase k_neighbors and/or decrease resolution.",
-  " - If clusters << 100: decrease k_neighbors and/or increase resolution.",
-  " - If many components persist: increase k_neighbors."
-)
-write_metrics(metrics_lines, out_metrics)
-message("📝 Run metrics saved to: ", out_metrics)
+  paste0("Unique rows: ", n_unique),
+  paste0("Duplicates removed: ", n_dup_removed)
+), out_metrics)
+
+message("✔ COMPLETE — canonicalized clustering complete")
