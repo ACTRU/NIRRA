@@ -8,9 +8,9 @@
 # http://www.apache.org/licenses/LICENSE-2.0
 # ==========================================================
 # ==========================================================
-# RunRidge_v5.2 — Ridge Regression Modeling (unconstrained and sign-constrained)
+# RunRidge_v5.3 — Ridge Regression Modeling (unconstrained and sign-constrained), (robustness patch for zero-variance predictors, empty-output handling, and safer audit export; core ridge modeling behavior unchanged.)
 # ==========================================================
-# Will Tower — 2026-03-16
+# Will Tower — 2026-03-18
 # ==========================================================
 
 suppressPackageStartupMessages({
@@ -56,6 +56,10 @@ n_subj <- length(y)
 
 prot_start <- which(names(df) == "FirstProtein")
 prot_end   <- which(names(df) == "LastProtein")
+
+if (length(prot_start) != 1 || length(prot_end) != 1 || prot_start > prot_end) {
+  stop("❌ Could not identify valid protein column range from 'FirstProtein' to 'LastProtein'.")
+}
 
 X_all <- df[, prot_start:prot_end]
 
@@ -170,8 +174,10 @@ results  <- list()
 scores   <- list()
 equivlog <- list()
 
-skipped_small <- 0L
-skipped_fit   <- 0L
+skipped_small      <- 0L
+skipped_fit        <- 0L
+skipped_zero_var   <- 0L
+skipped_all_const  <- 0L
 
 start_time <- Sys.time()
 
@@ -183,27 +189,57 @@ for (i in seq_len(n_sets_total)) {
   )
   
   if (length(genes) < 2) {
-    skipped_small <- skipped_small + 1
+    skipped_small <- skipped_small + 1L
     next
   }
   
-  X <- scale(as.matrix(X_all[, genes, drop = FALSE]))
-  colnames(X) <- genes
+  X_raw <- as.matrix(X_all[, genes, drop = FALSE])
+  
+  # Remove zero-variance columns before scaling
+  sds <- apply(X_raw, 2, sd, na.rm = TRUE)
+  keep <- is.finite(sds) & sds > 0
+  
+  if (!any(keep)) {
+    skipped_all_const <- skipped_all_const + 1L
+    next
+  }
+  
+  if (sum(!keep) > 0) {
+    skipped_zero_var <- skipped_zero_var + 1L
+  }
+  
+  X_raw <- X_raw[, keep, drop = FALSE]
+  genes_kept <- colnames(X_raw)
+  
+  if (ncol(X_raw) < 2) {
+    skipped_small <- skipped_small + 1L
+    next
+  }
+  
+  X <- scale(X_raw)
+  X <- as.matrix(X)
+  
+  if (any(!is.finite(X))) {
+    skipped_fit <- skipped_fit + 1L
+    next
+  }
+  
+  colnames(X) <- genes_kept
   
   fit_r <- ridge_fit(X, y, "free")
   fit_p <- ridge_fit(X, y, "nonneg")
   fit_n <- ridge_fit(X, y, "nonpos")
   
   if (is.null(fit_r) && is.null(fit_p) && is.null(fit_n)) {
-    skipped_fit <- skipped_fit + 1
+    skipped_fit <- skipped_fit + 1L
     next
   }
   
   a_p <- equiv_audit(X, fit_r, fit_p, "nonneg")
   a_n <- equiv_audit(X, fit_r, fit_n, "nonpos")
   
-  if (!is.null(a_p)) equivlog[[length(equivlog)+1]] <- a_p |> mutate(SetIndex=i)
-  if (!is.null(a_n)) equivlog[[length(equivlog)+1]] <- a_n |> mutate(SetIndex=i)
+  if (!is.null(a_p)) equivlog[[length(equivlog) + 1L]] <- a_p |> mutate(SetIndex = i)
+  if (!is.null(a_n)) equivlog[[length(equivlog) + 1L]] <- a_n |> mutate(SetIndex = i)
   
   model_list <- list(
     Ridge  = fit_r,
@@ -217,85 +253,129 @@ for (i in seq_len(n_sets_total)) {
     if (is.null(fit)) next
     
     coef_str <- paste0(
-      names(fit$beta),"=",sprintf("%.5f",fit$beta),
-      collapse=", "
+      names(fit$beta), "=", sprintf("%.5f", fit$beta),
+      collapse = ", "
     )
     
-    results[[length(results)+1]] <- tibble(
-      SetIndex=i,
-      Model=m,
-      Proteins=ppi$Proteins[i],
-      NumVars=length(genes),
-      ComboR2=fit$R2,
-      Lambda=fit$lambda,
-      Coefficients=coef_str
+    results[[length(results) + 1L]] <- tibble(
+      SetIndex      = i,
+      Model         = m,
+      Proteins      = ppi$Proteins[i],
+      NumVars       = ncol(X),
+      ComboR2       = fit$R2,
+      Lambda        = fit$lambda,
+      Coefficients  = coef_str
     )
     
-    scores[[length(scores)+1]] <- fit$yhat
+    scores[[length(scores) + 1L]] <- fit$yhat
   }
   
   if (i %% 25 == 0) {
-    elapsed <- difftime(Sys.time(), start_time, units="mins")
-    message("Processed ",i," / ",n_sets_total," | elapsed ",round(elapsed,2)," min")
+    elapsed <- difftime(Sys.time(), start_time, units = "mins")
+    message("Processed ", i, " / ", n_sets_total, " | elapsed ", round(elapsed, 2), " min")
   }
 }
 
 # ==========================================================
 # OUTPUT
 # ==========================================================
+if (length(results) == 0) {
+  write_csv(tibble(
+    SetIndex = integer(),
+    Model = character(),
+    Proteins = character(),
+    NumVars = integer(),
+    ComboR2 = double(),
+    Lambda = double(),
+    Coefficients = character()
+  ), out_models_csv)
+  
+  write_csv(tibble(SetID = character()), out_scores_csv)
+  write_csv(tibble(SetID = character(), ComboR2 = double(), R2_score = double(), Diff = double()), out_check_csv)
+  write_csv(tibble(SetIndex = integer(), Which = character(), FreeSatisfiesConstraint = logical(),
+                   MaxAbsDeltaYhat = double(), MaxAbsDeltaBeta = double()), out_equiv_csv)
+  
+  cat(
+    "N subjects:", n_subj, "\n",
+    "N PPI sets:", n_sets_total, "\n",
+    "N models:", 0, "\n",
+    "Skipped small:", skipped_small, "\n",
+    "Skipped fit:", skipped_fit, "\n",
+    "Skipped zero variance:", skipped_zero_var, "\n",
+    "Skipped all constant:", skipped_all_const, "\n",
+    file = out_metrics
+  )
+  
+  stop("❌ No models were successfully fit.")
+}
+
 final_df <- bind_rows(results)
 
 score_mat <- do.call(cbind, scores)
+score_mat <- as.matrix(score_mat)
 
 colnames(score_mat) <- paste0(
-  "Set_",final_df$SetIndex,"_",final_df$Model
+  "Set_", final_df$SetIndex, "_", final_df$Model
 )
 
 rownames(score_mat) <- df$Subject
 
-write_csv(final_df,out_models_csv)
+write_csv(final_df, out_models_csv)
 
-scores_df <- as.data.frame(t(score_mat))
-scores_df <- tibble::rownames_to_column(scores_df,"SetID")
+scores_df <- as.data.frame(t(score_mat), check.names = FALSE)
+scores_df <- tibble::rownames_to_column(scores_df, "SetID")
 
-write_csv(scores_df,out_scores_csv)
+write_csv(scores_df, out_scores_csv)
 
 # ==========================================================
 # VERIFY R²
 # ==========================================================
 sst <- sum((y - mean(y))^2)
 
-check_df <- lapply(seq_len(ncol(score_mat)), function(j){
+check_df <- lapply(seq_len(ncol(score_mat)), function(j) {
   
-  sc <- score_mat[,j]
-  sse <- sum((y-sc)^2)
+  sc <- score_mat[, j]
+  sse <- sum((y - sc)^2)
   
-  r2_score <- max(0,1-sse/sst)
+  r2_score <- max(0, 1 - sse / sst)
   
   tibble(
-    SetID=colnames(score_mat)[j],
-    ComboR2=final_df$ComboR2[j],
-    R2_score=r2_score,
-    Diff=r2_score-final_df$ComboR2[j]
+    SetID    = colnames(score_mat)[j],
+    ComboR2  = final_df$ComboR2[j],
+    R2_score = r2_score,
+    Diff     = r2_score - final_df$ComboR2[j]
   )
   
 }) |> bind_rows()
 
-write_csv(check_df,out_check_csv)
+write_csv(check_df, out_check_csv)
 
 # ==========================================================
 # METRICS
 # ==========================================================
 cat(
-  "N subjects:",n_subj,"\n",
-  "N PPI sets:",n_sets_total,"\n",
-  "N models:",nrow(final_df),"\n",
-  "Skipped small:",skipped_small,"\n",
-  "Skipped fit:",skipped_fit,"\n",
-  file=out_metrics
+  "N subjects:", n_subj, "\n",
+  "N PPI sets:", n_sets_total, "\n",
+  "N models:", nrow(final_df), "\n",
+  "Skipped small:", skipped_small, "\n",
+  "Skipped fit:", skipped_fit, "\n",
+  "Skipped zero variance:", skipped_zero_var, "\n",
+  "Skipped all constant:", skipped_all_const, "\n",
+  file = out_metrics
 )
 
-equiv_df <- bind_rows(equivlog)
-write_csv(equiv_df,out_equiv_csv)
+equiv_df <- if (length(equivlog) > 0) {
+  bind_rows(equivlog)
+} else {
+  tibble(
+    SetIndex = integer(),
+    Which = character(),
+    FreeSatisfiesConstraint = logical(),
+    MaxAbsDeltaYhat = double(),
+    MaxAbsDeltaBeta = double()
+  )
+}
+
+write_csv(equiv_df, out_equiv_csv)
 
 message("✔ COMPLETE — All three models retained")
