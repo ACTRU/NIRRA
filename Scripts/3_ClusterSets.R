@@ -25,7 +25,7 @@ suppressPackageStartupMessages({
 # ----------------------------
 # 1) File paths
 # ----------------------------
-in_file <- "/path/to/ALL_Set_Models.csv"
+in_file <- "~/path/to/ALL_Set_Models.csv"
 out_dir <- "~/path/to/output"
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
